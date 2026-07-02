@@ -51,12 +51,14 @@ function piecesDansLongueur(long, larg, trait) {
 // puis on empile des rangées de produits (épaisseur + trait) tant qu'on est hors
 // du bloc central. La cote de départ est optimisée par face pour max de volume.
 // ─────────────────────────────────────────────────────────────────────────────
-function optimiser({ diamCulee, diamFin, longueurGrumeM, traitMm, aubierMm, produits, objectif }) {
+function optimiser({ diamCulee, diamFin, longueurGrumeM, traitMm, aubierMm, flecheVCm, flecheLCm, produits, objectif }) {
   const rCulee = pf(diamCulee) * 10 / 2;
   const rFin = pf(diamFin) * 10 / 2;
   const L = pf(longueurGrumeM) * 1000;
   const trait = pf(traitMm);
   const aubier = Math.max(0, pf(aubierMm));
+  const fV = Math.max(0, pf(flecheVCm)) * 10; // courbure verticale, mm
+  const fL = Math.max(0, pf(flecheLCm)) * 10; // courbure latérale, mm
 
   if (rFin <= 0) return null;
   const Ru = Math.max(0, rFin - aubier);           // duramen au fin bout (limitant)
@@ -87,7 +89,14 @@ function optimiser({ diamCulee, diamFin, longueurGrumeM, traitMm, aubierMm, prod
 
   function remplirBande(yHaut, yBas, p) {
     const yEval = Math.max(Math.abs(yHaut), Math.abs(yBas));
-    const demi = demiCordeH(yEval);
+    let demi = demiCordeH(yEval);
+    // Perte par courbure : on scie droit dans un bois courbé, donc on rogne la
+    // largeur exploitable. Flèche latérale (fL) réduit la corde des deux côtés ;
+    // flèche verticale (fV) pénalise en profondeur (plus la bande est loin de
+    // l'axe horizontal, plus le bois s'est éloigné de la ligne de coupe).
+    const perteLat = fL / 2;
+    const perteVert = fV * (yEval / Ru) / 2; // 0 au centre, max au bord
+    demi = Math.max(0, demi - perteLat - perteVert);
     return { n: piecesDansLongueur(2 * demi, p.la, trait), demi };
   }
 
@@ -227,7 +236,7 @@ function optimiser({ diamCulee, diamFin, longueurGrumeM, traitMm, aubierMm, prod
 
   return {
     rCulee, rFin, Ru, aubier, trait, longueurGrumeM: pf(longueurGrumeM),
-    pieces, central, cotes, demiLargeurBloc, yMaxBloc, yMinBloc,
+    pieces, central, cotes, demiLargeurBloc, yMaxBloc, yMinBloc, fV, fL,
     rendement, surfaceSciee, parProduit,
   };
 }
@@ -293,42 +302,60 @@ function VueSection({ plan }) {
 // ─────────────────────────────────────────────────────────────────────────────
 function Vue3D({ plan }) {
   if (!plan) return null;
-  const { rCulee, rFin, Ru, longueurGrumeM, pieces } = plan;
+  const { rCulee, rFin, Ru, longueurGrumeM, pieces, fV } = plan;
   const Lmm = longueurGrumeM * 1000 || 1000;
 
   const size = 520, H = 220;
   const maxDia = Math.max(rCulee, rFin) * 2;
   const padX = 24, padTop = 20, padBot = 34;
   const sH = (size - 2 * padX) / Lmm;
-  const sV = (H - padTop - padBot) / maxDia;
+  const sV = (H - padTop - padBot) / (maxDia + (fV || 0));
 
   const gx = (x) => padX + x * sH;
   const rAt = (x) => rCulee + (rFin - rCulee) * Math.min(1, x / Lmm);
-  const midY = padTop + rCulee * sV;
-  const topY = (x) => midY - rAt(x) * sV;
-  const botY = (x) => midY + rAt(x) * sV;
+  // arc de la moelle : cintrage vertical, flèche max au milieu
+  const arc = (x) => {
+    const t = Math.min(1, Math.max(0, x / Lmm));
+    return 4 * (fV || 0) * t * (1 - t) * sV;
+  };
+  const axeCulee = padTop + rCulee * sV;
+  const axeY = (x) => axeCulee + arc(x);
+  const topY = (x) => axeY(x) - rAt(x) * sV;
+  const botY = (x) => axeY(x) + rAt(x) * sV;
 
-  const N = 20;
+  const N = 24;
   const xs = Array.from({ length: N + 1 }, (_, k) => (k / N) * Lmm);
   const topEdge = xs.map((x, k) => `${k ? "L" : "M"} ${gx(x)} ${topY(x)}`).join(" ");
   const botEdge = xs.slice().reverse().map((x) => `L ${gx(x)} ${botY(x)}`).join(" ");
   const grumePath = `${topEdge} ${botEdge} Z`;
 
-  // pièces : on projette leur position y de la section sur le profil, et leur
-  // longueur de débit sur x. On dessine seulement les pièces "horizontales"
-  // pour lisibilité (celles dont la hauteur de section correspond à l'épaisseur).
+  // ligne de sciage droite (référence), tangente au sommet à la culée
+  const yLigne = axeCulee - Ru * sV;
+
   return (
     <svg viewBox={`0 0 ${size} ${H}`} width="100%" style={{ maxWidth: 520, display: "block", margin: "0 auto" }}>
       <path d={grumePath} fill="#4a3d2c" stroke="#6b5a45" strokeWidth="1.5" opacity="0.9" />
+      {/* moelle courbée */}
+      {fV > 0 && (
+        <path d={xs.map((x, k) => `${k ? "L" : "M"} ${gx(x)} ${axeY(x)}`).join(" ")}
+          fill="none" stroke="#8a6f4a" strokeWidth="1" strokeDasharray="4 3" opacity="0.6" />
+      )}
+      {/* planches DROITES sur la ligne de sciage (elles ne suivent pas la courbe) */}
       {pieces.map((pc, i) => {
-        const ld = Lmm; // longueur affichée = pleine longueur grume (approx par produit)
-        const yC = midY - pc.y * sV;
+        const yC = yLigne + (Ru - pc.y) * sV;
         const hPx = Math.max(1.5, pc.h * sV);
         return (
-          <rect key={i} x={gx(0)} y={yC - hPx / 2} width={gx(ld) - gx(0)} height={hPx}
+          <rect key={i} x={gx(0)} y={yC - hPx / 2} width={gx(Lmm) - gx(0)} height={hPx}
             fill={pc.couleur} opacity="0.55" stroke="#1E2023" strokeWidth="0.3" />
         );
       })}
+      {fV > 0 && (
+        <>
+          <line x1={gx(0)} y1={yLigne} x2={gx(Lmm)} y2={yLigne} stroke={C.accent} strokeWidth="1" strokeDasharray="5 3" opacity="0.7" />
+          <text x={gx(Lmm)} y={yLigne - 5} fill={C.accent} fontSize="9" textAnchor="end">ligne de sciage</text>
+          <text x={gx(Lmm / 2)} y={botY(Lmm / 2) + 12} fill={C.att} fontSize="9" textAnchor="middle">flèche {round(fV / 10, 1)}cm</text>
+        </>
+      )}
       <text x={gx(0)} y={H - 6} fill={C.sec} fontSize="10" textAnchor="middle">Culée ⌀{Math.round(rCulee * 2 / 10)}cm</text>
       <text x={gx(Lmm)} y={H - 6} fill={C.sec} fontSize="10" textAnchor="middle">Fin bout ⌀{Math.round(rFin * 2 / 10)}cm</text>
     </svg>
@@ -344,6 +371,8 @@ export default function App() {
   const [longueur, setLongueur] = useState("6");
   const [trait, setTrait] = useState("4");
   const [aubier, setAubier] = useState("15");
+  const [flecheV, setFlecheV] = useState("0");
+  const [flecheL, setFlecheL] = useState("0");
   const [objectif, setObjectif] = useState("rendement");
   const [produits, setProduits] = useState([
     { nom: "Bastaing", essence: "Douglas", epaisseur: "27", largeur: "200", longueur: "4", nbSouhaite: "" },
@@ -353,8 +382,8 @@ export default function App() {
 
   const plan = useMemo(() => optimiser({
     diamCulee, diamFin, longueurGrumeM: longueur, traitMm: trait,
-    aubierMm: aubier, produits, objectif,
-  }), [diamCulee, diamFin, longueur, trait, aubier, produits, objectif]);
+    aubierMm: aubier, flecheVCm: flecheV, flecheLCm: flecheL, produits, objectif,
+  }), [diamCulee, diamFin, longueur, trait, aubier, flecheV, flecheL, produits, objectif]);
 
   const majProduit = (i, champ, val) =>
     setProduits((ps) => ps.map((p, k) => (k === i ? { ...p, [champ]: val } : p)));
@@ -407,6 +436,18 @@ export default function App() {
             <div style={{ flex: 1, minWidth: 100 }}>
               <label style={S.label}>Épaisseur aubier (mm)</label>
               <input style={S.input} value={aubier} onChange={(e) => setAubier(e.target.value)} inputMode="decimal" />
+            </div>
+          </div>
+          <div style={S.row}>
+            <div style={{ flex: 1, minWidth: 100 }}>
+              <label style={S.label}>Flèche verticale (cm)</label>
+              <input style={S.input} value={flecheV} onChange={(e) => setFlecheV(e.target.value)} inputMode="decimal" />
+              <div style={{ color: C.sec, fontSize: 11, marginTop: 3 }}>courbure de profil · perte en profondeur</div>
+            </div>
+            <div style={{ flex: 1, minWidth: 100 }}>
+              <label style={S.label}>Flèche latérale (cm)</label>
+              <input style={S.input} value={flecheL} onChange={(e) => setFlecheL(e.target.value)} inputMode="decimal" />
+              <div style={{ color: C.sec, fontSize: 11, marginTop: 3 }}>courbure de côté · rogne la largeur</div>
             </div>
           </div>
 
